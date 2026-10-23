@@ -1,0 +1,19 @@
+<?php
+require_once __DIR__.'/includes/functions.php';require_login();
+if(!is_razorpay_configured()){flash('error','Online payment is not configured.');redirect('orders.php');}
+$orderId=filter_input(INPUT_GET,'order',FILTER_VALIDATE_INT)?:0;$s=db()->prepare('SELECT * FROM orders WHERE id=? AND user_id=?');$s->execute([$orderId,current_user()['id']]);$order=$s->fetch();if(!$order||$order['payment_method']!=='razorpay'||$order['payment_status']==='paid'){redirect('orders.php');}
+if($_SERVER['REQUEST_METHOD']==='POST'){verify_csrf();$paymentId=(string)($_POST['razorpay_payment_id']??'');$razorOrder=(string)($_POST['razorpay_order_id']??'');$signature=(string)($_POST['razorpay_signature']??'');$expected=hash_hmac('sha256',$razorOrder.'|'.$paymentId,RAZORPAY_KEY_SECRET);
+if($razorOrder===$order['gateway_order_id']&&$paymentId!==''&&hash_equals($expected,$signature)){ $u=db()->prepare("UPDATE orders SET payment_status='paid',gateway_payment_id=?,status='confirmed' WHERE id=? AND user_id=?");$u->execute([$paymentId,$orderId,current_user()['id']]);flash('success','Payment verified. Your order is confirmed.');redirect('order.php?id='.$orderId);}http_response_code(400);$error='Payment verification failed. Contact support before retrying.';}
+if(empty($order['gateway_order_id'])){
+$payload=json_encode(['amount'=>(int)round((float)$order['total']*100),'currency'=>'INR','receipt'=>$order['order_number'],'payment_capture'=>1]);
+$ch=curl_init('https://api.razorpay.com/v1/orders');curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>$payload,CURLOPT_HTTPHEADER=>['Content-Type: application/json'],CURLOPT_USERPWD=>RAZORPAY_KEY_ID.':'.RAZORPAY_KEY_SECRET,CURLOPT_TIMEOUT=>20]);$raw=curl_exec($ch);$status=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);$result=json_decode((string)$raw,true);
+if($status<200||$status>=300||empty($result['id'])){http_response_code(502);exit('Could not initialize payment. Check Razorpay test credentials and cURL. Your order is saved; contact support before placing another order.');}
+$u=db()->prepare('UPDATE orders SET gateway_order_id=? WHERE id=?');$u->execute([$result['id'],$orderId]);$order['gateway_order_id']=$result['id'];
+}
+$page_title='Secure payment';include __DIR__.'/includes/header.php'; ?>
+<div class="container py-5" style="max-width:700px"><div class="summary-box"><span class="eyebrow">Secure checkout</span><h1 class="section-title mt-2">Complete your payment</h1><p>Order <strong><?= e($order['order_number']) ?></strong> · Total <strong><?= money($order['total']) ?></strong></p><?php if(!empty($error)): ?><div class="alert alert-danger"><?= e($error) ?></div><?php endif; ?><p class="muted">Razorpay test checkout will open. Use test credentials/cards from Razorpay documentation; no real money should be charged in test mode.</p><button id="pay-button" class="btn btn-dark">Pay <?= money($order['total']) ?> securely</button></div></div>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>
+const options={key:<?= json_encode(RAZORPAY_KEY_ID) ?>,amount:<?= (int)round((float)$order['total']*100) ?>,currency:"INR",name:"StyleCart",description:"Order <?= e($order['order_number']) ?>",order_id:<?= json_encode($order['gateway_order_id']) ?>,handler:function(r){const f=document.createElement('form');f.method='POST';f.action='<?= e(url('pay.php?order='.$orderId)) ?>';[['csrf',<?= json_encode(csrf_token()) ?>],['razorpay_payment_id',r.razorpay_payment_id],['razorpay_order_id',r.razorpay_order_id],['razorpay_signature',r.razorpay_signature]].forEach(([k,v])=>{const i=document.createElement('input');i.type='hidden';i.name=k;i.value=v;f.appendChild(i)});document.body.appendChild(f);f.submit();},theme:{color:"#202723"}};
+document.getElementById('pay-button').addEventListener('click',()=>new Razorpay(options).open());
+</script>
+<?php include __DIR__.'/includes/footer.php'; ?>
